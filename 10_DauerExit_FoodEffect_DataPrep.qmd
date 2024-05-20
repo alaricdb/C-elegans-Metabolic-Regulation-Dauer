@@ -1,0 +1,33 @@
+## This script selects the T0 and T9 columns for all the experiment with the condition of interest which is the avilability of food surce during the dauer exit. The T9 would represent our cell in healthy state and the T0 would represent the dauer state.
+```{r}
+# Load the experimental data
+dauer_experimental_data <- read.csv("/Users/alaric/Desktop/Master_Thesis_Systems_Biology/Papers/Transcriptomics Dauer Experiment/12915_2022_1471_MOESM2_ESM.csv") # adjust the path 
+
+# Selecting only the dataframe for cells with bateria for dauer exit
+food_dauer_experimental_data <- dauer_experimental_data[, grep("A|gene", colnames(dauer_experimental_data))]
+
+# Selecting only the dataframe at 0 and 9 hours that would correspond to the "dauer" state
+time0_food_dauer_experimental_data <- food_dauer_experimental_data[, grep("0|gene", colnames(food_dauer_experimental_data))]
+time9_food_dauer_experimental_data <- food_dauer_experimental_data[, grep("9|gene", colnames(food_dauer_experimental_data))]
+
+# Mean the 4 experiments 
+mean_time0_food_dauer_experimental_data <- rowMeans(time0_food_dauer_experimental_data[, 2:5])
+mean_time9_food_dauer_experimental_data <- rowMeans(time9_food_dauer_experimental_data[, 2:5])
+
+# Adding the mean as a new column named 'avg_counts'
+time0_food_dauer_experimental_data$avg_counts <- mean_time0_food_dauer_experimental_data
+time9_food_dauer_experimental_data$avg_counts <- mean_time9_food_dauer_experimental_data
+
+# Renaming the 'gene' column to 'gene_name'
+colnames(time0_food_dauer_experimental_data)[colnames(time0_food_dauer_experimental_data) == "gene"] <- "gene_name"
+colnames(time9_food_dauer_experimental_data)[colnames(time9_food_dauer_experimental_data) == "gene"] <- "gene_name"
+
+# Creating a new data frame with only 'gene' and 'avg_counts'
+t0_final_data <- data.frame(gene_name=time0_food_dauer_experimental_data$gene_name, avg_counts=time0_food_dauer_experimental_data$avg_counts)
+t9_final_data <- data.frame(gene_name=time9_food_dauer_experimental_data$gene_name, avg_counts=time9_food_dauer_experimental_data$avg_counts)
+
+# Saving the new data frame as a CSV file
+write.csv(t0_final_data, file = "/Users/alaric/Desktop/Master_Thesis_Systems_Biology/Code_local/outputs_local/Experimental_mean/averaged_t0_dauer_experimental_data.csv", row.names = FALSE) # adjust the path 
+write.csv(t9_final_data, file = "/Users/alaric/Desktop/Master_Thesis_Systems_Biology/Code_local/outputs_local/Experimental_mean/averaged_t9_dauer_experimental_data.csv", row.names = FALSE) # adjust the path 
+
+```

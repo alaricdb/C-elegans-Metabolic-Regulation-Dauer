@@ -1,0 +1,70 @@
+---
+title: "GEM"
+output: html_document
+date: "2024-01-31"
+---
+
+## Importing all required libraries
+```{python}
+import cobra
+from cobra.io import read_sbml_model
+import pandas as pd
+from cobra.flux_analysis import imat
+import os
+```
+
+## Importing Data from: https://wormflux.umassmed.edu/download.php
+Run this script in the terminal
+```{bash}
+cd /media/cdn-bc/RAID/StudentProjects/Alaric/originals
+wget -O iCEL1314.xml https://wormflux.umassmed.edu/Downloads/iCEL1314.xml
+```
+
+## Load Transcriptomics (Seurat filtered), GEM model and gene annotation 
+```{python}
+# Load Transcriptomic counts with their associated gene id 
+rna_mean_normalized = pd.read_csv('/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/rna_mean_normalized.txt', sep='\t')
+
+# Load the iCEL1314 GEM model
+model_iCEL1314 = read_sbml_model("/media/cdn-bc/RAID/StudentProjects/Alaric/originals/iCEL1314.xml")
+```
+
+## Create CSV files to get the ideas of the quantitative informations of the model
+```{python}
+# Extract metabolites
+metabolites_data = [{
+    'ID': met.id,
+    'Name': met.name,
+    'Formula': met.formula,
+    'Compartment': met.compartment
+} for met in model_iCEL1314.metabolites]
+
+# Extract reactions
+reactions_data = [{
+    'ID': rxn.id,
+    'Name': rxn.name,
+    'Equation': str(rxn.reaction),
+    'Lower Bound': rxn.lower_bound,
+    'Upper Bound': rxn.upper_bound,
+    'Objective Coefficient': rxn.objective_coefficient
+} for rxn in model_iCEL1314.reactions]
+
+# Extract genes
+genes_data = [{
+    'ID': gene.id,
+    'Associated Reactions': [rxn.id for rxn in gene.reactions]
+} for gene in model_iCEL1314.genes]
+
+# Create DataFrames
+df_metabolites = pd.DataFrame(metabolites_data)
+df_reactions = pd.DataFrame(reactions_data)
+df_genes = pd.DataFrame(genes_data)
+
+# Specify the directory where you want to save the files
+save_directory = '/media/cdn-bc/RAID/StudentProjects/Alaric/outputs'
+
+# Save DataFrames to CSV files with full paths
+df_metabolites.to_csv(os.path.join(save_directory, 'iCEL1314_metabolites.csv'), index=False)
+df_reactions.to_csv(os.path.join(save_directory, 'iCEL1314_reactions.csv'), index=False)
+df_genes.to_csv(os.path.join(save_directory, 'iCEL1314_genes.csv'), index=False)
+```

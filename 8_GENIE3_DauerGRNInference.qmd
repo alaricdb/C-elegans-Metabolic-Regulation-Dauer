@@ -1,0 +1,306 @@
+---
+title: "GENIE3 Transcriptomics Network"
+format: html
+editor: source
+---
+
+```{r}
+# Load required libraries
+library(Seurat)
+library(GENIE3)
+library(tidyverse)
+library(autothresholdr)
+library(igraph)
+library(pheatmap)
+```
+
+```{r}
+# Define gene sets relative which are knocked out in these pathways during dauer
+TGF_beta_signaling_genes <- c('daf-1', 'daf-4', 'daf-7', 'daf-8', 'daf-14') 
+insuline_peptides <- c('ins-6', 'ins-4') 
+IIS_pathway_genes <- c('daf-2', 'age-1', 'daf-28')
+serotonin_genes <- c('tph-1')
+steroid_hormone_signaling_genes <- c('daf-9')
+
+# Create gene vector containing genes for all the affected dauer pathways 
+gene_names <- c(TGF_beta_signaling_genes, insuline_peptides, IIS_pathway_genes, serotonin_genes, steroid_hormone_signaling_genes)
+
+# Load the Seurat object
+packer_Seurat_filtered <- readRDS("/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/RDS_files/packer_Seurat_filtered.rds")
+
+# Extract the names of the most variable genes from the Seurat object
+top_variable_genes <- head(VariableFeatures(packer_Seurat_filtered[["RNA"]]), 2000)
+
+# Get normalized RNA
+rna_normalized <- GetAssayData(object = packer_Seurat_filtered, assay = "RNA", slot = "counts")
+
+# Load the iCEL1314 GEM genes from a CSV file
+iCEL1314_genes <- read.csv("/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/iCEL1314_genes.csv")
+# Assuming the column with gene IDs is named "ID"
+iCEL1314_genes_ID_list <- iCEL1314_genes$ID
+
+# Convert iCEL1314 IDs into names to be on the same format as the names 
+# Load gene annotation GTF file
+gene_annotation_gtf <- read.table("/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/gene_annotation_gtf.txt", header = TRUE, sep = "\t")
+
+# Create a named vector with gene IDs as names and gene names as values
+gtf_id_to_name <- setNames(gene_annotation_gtf$gene_name, gene_annotation_gtf$gene_id)
+
+# Map the iCEL1314 gene IDs to their names using the named vector
+iCEL1314_genes_names <- gtf_id_to_name[iCEL1314_genes_ID_list]
+missing_names <- is.na(iCEL1314_genes_names)
+if (any(missing_names)) {
+  warning("Some gene IDs did not have a corresponding name in the GTF and will be excluded.")
+  iCEL1314_genes_names <- iCEL1314_genes_names[!missing_names]
+  iCEL1314_genes_ID_list <- iCEL1314_genes_ID_list[!missing_names]
+}
+
+# Combine the iCEL1314 genes with the most variable genes, ensuring no redundancy
+combined_genes <- unique(c(iCEL1314_genes_names, top_variable_genes))
+
+# Intersect the combined genes with the row names of the normalized RNA data to ensure all genes are present
+combined_genes_final <- intersect(combined_genes, rownames(rna_normalized))
+
+# Subset the normalized RNA data to include only the genes in the final combined list
+rna_normalized_filtered <- rna_normalized[combined_genes_final, ]
+
+# Convert the normalized RNA data to a dense matrix if necessary
+rna_dense_matrix <- as.matrix(rna_normalized_filtered)
+
+## Co-expression network
+# Sample the dataset
+set.seed(428) # For reproducibility
+rna_dense_matrix_sample <- rna_dense_matrix[,sample(1:ncol(rna_dense_matrix), 5000)]
+saveRDS(rna_dense_matrix_sample, file = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/RDS_files/rna_dense_matrix_sample.rds")
+
+# Save the gene names and the dense matrix as an RDS file
+gene_data_and_matrix_genie <- list(gene_names = combined_genes_final, rna_dense_matrix = rna_dense_matrix_sample)
+saveRDS(gene_data_and_matrix_genie, file = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/RDS_files/gene_data_and_matrix_genie.rds")
+
+# Run GENIE3 for gene regulatory network inference
+grn <- GENIE3(gene_data_and_matrix_genie$rna_dense_matrix, regulators = gene_data_and_matrix_genie$gene_names, nCores = 10)
+saveRDS(grn, file = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/RDS_files/grn.rds")
+
+# Convert the weight matrix to a data frame
+linkList <- as.data.frame(grn) %>% 
+  rownames_to_column("targetGene") %>% 
+  pivot_longer(-targetGene, names_to = "regulatoryGene", values_to = "weight")
+
+# Adjust matrix transposition (t()) as necessary for your data structure
+corr_matrix <- cor(t(rna_dense_matrix_sample), method = "spearman")
+
+# Flatten the correlation matrix to a vector, excluding the diagonal (self-correlations)
+corr_values <- corr_matrix[lower.tri(corr_matrix, diag = FALSE)]
+
+# Assign the NA correlation values to 0
+corr_values[is.na(corr_values)] <- 0
+
+# Plot density plot of corr_values cleaned from NA
+plot(density(corr_values), main = "Density of Correlation Coefficients Cleaned From NA", xlab = "Correlation Coefficient", ylab = "Density", col = "red")
+```
+
+## This part write tsv files necessary for the creation of the AnnData for CellOracle. Seurat object is filtered based on cell and genes present in the sampled rna_dense_matrix. The rna_normalized was changed to slot="counts" for raw data.
+```{r}
+# Creating tsv files for the AnnData Object needed in CellOracle
+# Identify the Cells and Features to Include
+cell_ids_to_include <- colnames(rna_dense_matrix_sample)
+gene_names_to_include <- rownames(rna_dense_matrix_sample)
+
+# Filter the Seurat Object
+filtered_seurat <- subset(packer_Seurat_filtered, cells = cell_ids_to_include)
+filtered_seurat <- subset(filtered_seurat, features = gene_names_to_include)
+
+# Extract Raw Data and Metadata
+# Raw data
+raw_data <- GetAssayData(filtered_seurat, slot = "counts")
+
+# Metadata
+metadata <- filtered_seurat@meta.data
+
+# Write the Data to TSV Files
+raw_data_df <- as.data.frame(as.matrix(raw_data))
+raw_data_df <- t(raw_data_df)
+metadata_df <- as.data.frame(metadata)
+
+# Write to TSV
+write.table(raw_data_df, file = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/raw_data.tsv", sep = "\t", quote = FALSE, row.names = TRUE, col.names = NA)
+write.table(metadata_df, file = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/metadata.tsv", sep = "\t", quote = FALSE, row.names = TRUE, col.names = NA)
+```
+
+```{r}
+# "corr" column: 1 if the correlation between the targetGene and the target is > 0.03, -1 if the correlation is < -0.03 and 0 otherwise.
+# Convert correlation values based on specified thresholds
+correlation.matrix <- as.data.frame(corr_matrix) %>%
+  rownames_to_column("regulatoryGene") %>%
+  pivot_longer(-regulatoryGene, names_to = "targetGene", values_to = "corr") %>%
+  mutate(corr.bin = case_when(
+    corr > 0.03 ~ 1,
+    corr < -0.03 ~ -1,
+    TRUE ~ 0
+  )) %>%
+  distinct()
+
+# In linkList, filter "regulatoryGene" for previously populated gene_names
+linkList_gene_names <- linkList %>%
+  filter(regulatoryGene %in% gene_names)
+
+# Join correlation binarization with weights
+weight_corr <- linkList_gene_names %>%
+  left_join(correlation.matrix, by = c("targetGene", "regulatoryGene")) %>%
+  select(-corr)
+
+# Label directionality based on the binarized correlation
+weight_dir <- weight_corr %>%
+  mutate(weight_dir = weight * corr.bin,
+         direction = case_when(
+           corr.bin == 1 ~ "positive",
+           corr.bin == -1 ~ "negative",
+           TRUE ~ "neutral"
+         ))
+
+# Save or load 'weight_dir' as needed
+saveRDS(weight_dir, file="/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/RDS_files/weight_dir.rds")
+# weight_dir <- readRDS("/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/RDS_files/weight_dir.rds")
+
+# Plot the density of correlation coefficients with thresholds
+plot_density_with_thresholds <- function(corr_values) {
+  # Calculate density
+  density_data <- density(corr_values)
+  
+  # Plot density
+  plot(density_data, main = "Density of Correlation Coefficients with Thresholds", 
+       xlab = "Correlation Coefficient", ylab = "Density", col = "red")
+  
+  # Add threshold lines
+  abline(v = 0.03, col = "blue", lwd = 2, lty = 2) # Positive threshold
+  abline(v = -0.03, col = "green", lwd = 2, lty = 2) # Negative threshold
+  
+  # Add a legend
+  legend("topright", legend = c("Positive Threshold", "Negative Threshold"), 
+         col = c("blue", "green"), lwd = 2, lty = 2)
+}
+
+# Use the function to plot the correlation values
+plot_density_with_thresholds(corr_values)
+```
+
+```{r}
+# Plotting distribution for assigning threshold, adjusting plot aesthetics
+plot_distribution <- function(data, direction_filter, title_prefix) {
+  data %>%
+    filter(direction %in% direction_filter) %>% 
+    ggplot(aes(x = weight_dir)) +
+    geom_density(color = ifelse("positive" %in% direction_filter, "blue", "red"), fill = ifelse("positive" %in% direction_filter, "blue", "red"), alpha = 0.5) +
+    labs(title = paste(title_prefix, "direction"), x = "Weight Direction", y = "Density") +
+    theme_minimal()
+}
+
+p_positive <- plot_distribution(weight_dir, c("positive", "na"), "Positive")
+p_negative <- plot_distribution(weight_dir, c("negative", "na"), "Negative")
+
+# Display plots side by side
+gridExtra::grid.arrange(p_positive, p_negative, ncol = 2)
+
+# Autothreshold to obtain threshold for GENIE weights
+thresh_methods <- c(
+  "IJDefault", "Huang", "Huang2", "Intermodes", "IsoData",
+  "Li", "Mean", "MinErrorI", "Minimum", "Moments", "Otsu",
+  "Percentile", "RenyiEntropy", "Shanbhag", "Triangle")
+
+# Function to calculate thresholds
+calculate_thresholds <- function(weights, direction, multiplier) {
+  weight_values <- if (direction == "positive") {
+    as.numeric(ceiling(weights * 1000))
+  } else {
+    as.numeric(abs(ceiling(weights * multiplier)))
+  }
+
+  thresholds <- purrr::map_chr(thresh_methods, ~ auto_thresh(weight_values, .)) %>%
+    tibble(method = thresh_methods, threshold = .)
+  
+  if (direction == "positive") {
+    thresholds %>% mutate(adj = as.numeric(threshold) / 1000)
+  } else {
+    thresholds %>% mutate(adj = as.numeric(threshold) * -1 / multiplier)
+  }
+}
+
+# Applying the function to positive and negative directions
+pos_weights <- weight_dir %>% filter(direction %in% c("positive", "na")) %>% pull(weight_dir)
+neg_weights <- weight_dir %>% filter(direction %in% c("negative", "na")) %>% pull(weight_dir)
+
+thresholds_pos <- calculate_thresholds(pos_weights, "positive", 1000)
+thresholds_neg <- calculate_thresholds(neg_weights, "negative", 10000)
+
+# Plotting the densities with threshold lines
+plot_with_thresholds <- function(data, direction_filter, thresholds, title_prefix) {
+  p <- data %>%
+    filter(direction %in% direction_filter) %>%
+    ggplot(aes(x = weight_dir)) +
+    geom_density(color = ifelse("positive" %in% direction_filter, "blue", "red"), fill = ifelse("positive" %in% direction_filter, "blue", "red"), alpha = 0.5) +
+    geom_vline(data = thresholds, aes(xintercept = adj), color = "black", linetype = "dashed") +
+    geom_text(data = thresholds, aes(x = adj, y = 0, label = method), angle = 90, vjust = -0.5) + # Adding labels
+    labs(title = paste(title_prefix, "direction with thresholds"), x = "Weight Direction", y = "Density") +
+    theme_minimal()
+  return(p)
+}
+
+p_positive_thresholds <- plot_with_thresholds(weight_dir, c("positive", "na"), thresholds_pos, "Positive")
+p_negative_thresholds <- plot_with_thresholds(weight_dir, c("negative", "na"), thresholds_neg, "Negative")
+
+# Display plots side by side with thresholds
+gridExtra::grid.arrange(p_positive_thresholds, p_negative_thresholds, ncol = 2)
+```
+
+```{r}
+# Extracting RenyiEntropy and Huang2 thresholds
+RenyiEntropy_threshold_pos <- filter(thresholds_pos, method == "RenyiEntropy") %>% pull(adj)
+Huang2_threshold_neg <- filter(thresholds_neg, method == "Huang2") %>% pull(adj)
+
+# Filtering weights based on RenyiEntropy threshold
+filt_neg <- weight_dir %>%
+  filter(direction == "negative") %>%
+  mutate(adj_weight = ifelse(weight_dir <= Huang2_threshold_neg, -1, 0))
+
+filt_pos <- weight_dir %>%
+  filter(direction %in% c("positive")) %>%
+  mutate(adj_weight = ifelse(weight_dir >= RenyiEntropy_threshold_pos, 1, 0))
+
+filt_zero <- weight_dir %>%
+  filter(direction == "na") %>%
+  mutate(adj_weight = 0)
+
+filt_weights <- rbind(filt_neg, filt_pos, filt_zero)
+saveRDS(filt_weights, file="/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/RDS_files/filt_weights.rds") 
+#filt_weights <- readRDS("/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/RDS_files/filt_weights.rds") 
+
+# Building GRN matrix
+# The GRN matrix doesnt contain the proper gene names, problem here
+GRN_MATRIX <- filt_weights %>% 
+  arrange(regulatoryGene) %>% 
+  rename(gene_short_name = targetGene) %>% 
+  mutate(adj_weight = case_when(gene_short_name == regulatoryGene ~ 1,
+                                TRUE ~ adj_weight)) %>%
+  select(-weight, -weight_dir, -direction, -corr.bin) %>% 
+  pivot_wider(names_from = regulatoryGene, values_from = adj_weight, values_fill = list(adj_weight = 0)) %>% 
+  arrange(gene_short_name) %>% 
+  mutate(peak_id = gene_short_name,
+         .before = gene_short_name)
+
+#readr::write_tsv(GRN_MATRIX, "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/GRN_MATRIX.tsv")
+
+# igraph of network
+net <- filt_weights %>% 
+  filter(adj_weight != 0)
+
+gnet <- graph_from_data_frame(d = net, directed = TRUE) 
+
+V(gnet)$color <- "gray50" # Default node color
+
+# Plotting
+jpeg("/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures/GRN_graph.jpg")
+plot(gnet, edge.color = ifelse(E(gnet)$direction == "positive", "blue", "red"), 
+     edge.width = E(gnet)$weight * 5, edge.arrow.size = 0.5, 
+     layout = layout_nicely(gnet), vertex.label = NA, vertex.size = 1, main = "GRN")
+dev.off()
+```

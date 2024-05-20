@@ -1,0 +1,232 @@
+---
+title: "Transcriptomics to iMAT"
+output: html_document
+editor: source
+---
+## Importing all required libraries
+```{r}
+library(Seurat)
+library(tidyverse)
+```
+
+## Preparing the normalized transcriptomics data from the seurat object for the iMAT 
+```{r}
+# Load Seurat object
+packer_Seurat_filtered <- readRDS(file = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/RDS_files/packer_Seurat_filtered.rds")
+
+# Retrieve normalized data matrix from Seurat object to mitigate cell variability
+rna_mean_normalized <- GetAssayData(object = packer_Seurat_filtered, assay = "RNA", slot = "data")
+
+# Extract the gene names and calculate mean expression per gene
+gene_names <- rownames(rna_mean_normalized)  # Extract gene names
+rna_mean_normalized <- rowMeans(rna_mean_normalized[,]) # Calculate mean expression per gene
+
+# Create data frame with gene names and corresponding average expression counts
+rna_mean_normalized <- data.frame(
+  gene_name = gene_names,
+  avg_counts = rna_mean_normalized
+)
+
+# Load gene annotation GTF file
+gene_annotation_gtf <- read.table("/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/gene_annotation_gtf.txt", header = TRUE, sep = "\t")
+
+# Merge result_data_frame with gene_annotation_gtf to map gene_id to each gene_name
+merged_data_frame <- merge(rna_mean_normalized, gene_annotation_gtf, by.x = "gene_name", by.y = "gene_name", all.x = TRUE)
+
+# Filter rows where gene_id is NA
+genes_without_id <- merged_data_frame[is.na(merged_data_frame$gene_id), ]
+
+# Extract gene names that don't have a corresponding gene_id
+gene_names_without_id <- genes_without_id$gene_name
+
+# View gene names without a gene_id
+print(gene_names_without_id)
+
+# Create data frame that only contains the gene ids and the counts 
+rna_mean_normalized <- na.omit(
+  data.frame(
+    gene_id = merged_data_frame$gene_id,
+    avg_counts = merged_data_frame$avg_counts
+  )
+)
+
+# Output the final data frame with gene_id and avg_counts to a file
+write.table(rna_mean_normalized, 
+            '/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/rna_mean_normalized.txt', 
+            sep = "\t", 
+            row.names = FALSE,  # Remove row numbers in your output file
+            col.names = TRUE,  # Column names are included as the header
+            quote = FALSE)
+```
+
+## Preparing the imputed and altered data from CellOracle for iMAT and checking if the GEM is well represented
+```{r}
+# Load Seurat object
+packer_Seurat_filtered <- readRDS(file = "/Users/alaric/Desktop/Master_Thesis_Systems_Biology/Code/outputs/RDS_files/packer_Seurat_filtered.rds")
+
+# Load the imputed/altered data from CellOracle
+# Note 1: we work with the scaled data 
+# Note 2: when using the read_csv function, be super careful: _csv and .csv don't process "-" the same way and this could lead to mismatch in the data set
+combined_KO_altered_expression <- read_csv("/Users/alaric/Desktop/Master_Thesis_Systems_Biology/Code/outputs/imputed_scaled_count.csv") # Adjust for all the data created from CellOracle
+
+# Mean the columns for all the cells
+combined_KO_altered_expression_scaled_count_mean <- combined_KO_altered_expression %>%
+  select(-"...1") %>%
+  summarise_all(~mean(., na.rm = TRUE)) %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "gene_name") %>%
+  rename(avg_counts = V1)
+  
+# Load gene annotation GTF file
+gene_annotation_gtf <- read.table("/Users/alaric/Desktop/Master_Thesis_Systems_Biology/Code/outputs/gene_annotation_gtf.txt", header = TRUE, sep = "\t")
+
+# Merge result_data_frame with gene_annotation_gtf to map gene_id to each gene_name
+merged_data_frame <- merge(combined_KO_altered_expression_scaled_count_mean, gene_annotation_gtf, all.x = TRUE) # left_join
+
+# Count the number of NA gene_id 
+na_count <- sum(is.na(merged_data_frame)) 
+
+# Filter rows where gene_id is NA
+genes_without_id <- merged_data_frame[is.na(merged_data_frame$gene_id), ]
+
+# Extract gene names that don't have a corresponding gene_id
+gene_names_without_id <- genes_without_id$gene_name
+
+# View gene names without a gene_id
+print(gene_names_without_id)
+
+# Create data frame that only contains the gene ids and the counts 
+combined_KO_altered_expression_scaled_count_mean_for_iMAT <- na.omit(
+  data.frame(
+    gene_id = merged_data_frame$gene_id,
+    avg_counts = merged_data_frame$avg_counts
+  )
+) #normalised
+
+# Load the genes ids from the GEM model
+iCEL1314_genes <- read_csv("/Users/alaric/Desktop/Master_Thesis_Systems_Biology/Code/outputs/iCEL1314_genes.csv")
+
+# Check how many counts from imputed_scaled_count_mean are missing inside iCEL1314_genes
+missing_genes <- !iCEL1314_genes$ID %in% combined_KO_altered_expression_scaled_count_mean_for_iMAT$gene_id
+missing_genes_df <- iCEL1314_genes[missing_genes, ] 
+
+# Output the final data frame with gene_id and avg_counts to a file
+write.table(combined_KO_altered_expression_scaled_count_mean_for_iMAT, 
+            '/Users/alaric/Desktop/Master_Thesis_Systems_Biology/Code_local/outputs_local/KO_daf_7_altered_expression.txt', 
+            sep = "\t", 
+            row.names = FALSE,  
+            col.names = TRUE,  
+            quote = FALSE)
+```
+
+## Preparing the experimental_datasets for iMAT and checking if the GEM is well represented
+```{r}
+# Loading the packerSeuratFiltered and the experimental data
+packer_Seurat_filtered <- readRDS(file = "/Users/alaric/Desktop/Master_Thesis_Systems_Biology/Code/outputs/RDS_files/packer_Seurat_filtered.rds")
+averaged_t0_dauer_experimental_data <- read_csv("/Users/alaric/Desktop/Master_Thesis_Systems_Biology/Code_local/outputs_local/Experimental_mean/All_cells/averaged_t0_dauer_experimental_data.csv")
+  
+# Load gene annotation GTF file
+gene_annotation_gtf <- read.table("/Users/alaric/Desktop/Master_Thesis_Systems_Biology/Code/outputs/gene_annotation_gtf.txt", header = TRUE, sep = "\t")
+
+# Merge result_data_frame with gene_annotation_gtf to map gene_id to each gene_name
+merged_data_frame <- merge(averaged_t0_dauer_experimental_data, 
+                           gene_annotation_gtf, 
+                           by = "gene_name", 
+                           all.x = TRUE)
+
+# Count the number of NA gene_id 
+na_count <- sum(is.na(merged_data_frame)) 
+
+# Filter rows where gene_id is NA
+genes_without_id <- merged_data_frame[is.na(merged_data_frame$gene_id), ]
+
+# Extract gene names that don't have a corresponding gene_id
+gene_names_without_id <- genes_without_id$gene_name
+
+# View gene names without a gene_id
+print(gene_names_without_id)
+
+# Create data frame that only contains the gene ids and the counts 
+averaged_t0_dauer_experimental_data_for_iMAT <- na.omit(
+  data.frame(
+    gene_id = merged_data_frame$gene_id,
+    avg_counts = merged_data_frame$avg_counts
+  )
+) #normalised
+
+# Load the genes ids from the GEM model
+iCEL1314_genes <- read_csv("/Users/alaric/Desktop/Master_Thesis_Systems_Biology/Code/outputs/iCEL1314_genes.csv")
+
+# Check how many counts from imputed_scaled_count_mean are missing inside iCEL1314_genes
+missing_genes <- !iCEL1314_genes$ID %in% averaged_t0_dauer_experimental_data_for_iMAT$gene_id
+missing_genes_df <- iCEL1314_genes[missing_genes, ] 
+
+# Output the final data frame with gene_id and avg_counts to a file
+write.table(averaged_t0_dauer_experimental_data_for_iMAT, 
+            '/Users/alaric/Desktop/Master_Thesis_Systems_Biology/Code_local/outputs_local/averaged_t0_dauer_experimental_data_for_iMAT.txt', 
+            sep = "\t", 
+            row.names = FALSE,  
+            col.names = TRUE,  
+            quote = FALSE)
+```
+
+## Preparing the imputed and the altered datasets for different neuronal cell populations
+```{r}
+# Load Seurat object
+packer_Seurat_neurons <- readRDS(file = "/Users/alaric/Desktop/Master_Thesis_Systems_Biology/Code/outputs/RDS_files/packer_Seurat_neurons.rds")
+
+# Retrieve normalized data matrix from Seurat object to mitigate cell variability
+rna_mean_normalized <- GetAssayData(object = packer_Seurat_neurons, assay = "RNA", slot = "data")
+
+# Creating a list of sensory neurons 
+sensory_neurons <- c('ADA', 'ADE', 'ADF', 'ADL', 'AFD', 'AIA', 'AIB', 'AIM', 'AIN', 'AIY', 'AIZ', 'ALA', 'ALM', 'ALN', 'AQR', 'AS', 'ASEL', 'ASER', 'ASG', 'ASH', 'ASI', 'ASJ', 'ASK', 'AUA', 'AVA', 'AVB', 'AVD', 'AVE', 'AVF', 'AVG', 'AVH', 'AVJ', 'AVK', 'AVL', 'AVM', 'AWA', 'AWB', 'AWC_OFF', 'AWC_ON', 'BAG', 'BDU', 'CAN', 'CEP', 'DA', 'DA9', 'DB', 'DB01', 'DVA', 'DVB', 'DVC', 'FLP', 'HSN', 'I1', 'I2', 'I3', 'I4', 'I5', 'I6', 'IL1', 'IL2_DV', 'IL2_LR', 'LUA', 'M1', 'M2', 'M3', 'M4', 'M5', 'MC', 'MI', 'NSM', 'OLL', 'OLQ', 'PDA', 'PDB', 'PDE', 'PHA', 'PHB', 'PHC', 'PLM', 'PLN', 'PQR', 'PVC', 'PVD', 'PVM', 'PVN', 'PVP', 'PVQ', 'PVR', 'PVT', 'PVW', 'RIA', 'RIB', 'RIC', 'RID', 'RIF', 'RIG', 'RIH', 'RIM', 'RIP', 'RIR', 'RIS', 'RIV', 'RMD_DV', 'RMD_LR', 'RME_DV', 'RME_LR', 'RMF', 'RMG', 'RMH', 'SAA', 'SAB', 'SDQ', 'SIA', 'SIB', 'SMB', 'SMD', 'URA', 'URB', 'URX', 'URY', 'VA', 'VA12', 'VB', 'VB01', 'VB02', 'VC', 'VC_4_5', 'VD_DD')
+
+# Identify cells that are sensory neurons
+sensory_neuron_cells <- WhichCells(object = packer_Seurat_neurons, 
+                                   expression = cell.subtype %in% sensory_neurons)
+
+# Subset the Seurat object to keep only those sensory neurons
+sensory_neurons_data <- subset(x = packer_Seurat_neurons, cells = sensory_neuron_cells)
+
+# Retrieve normalized data matrix from this subset
+rna_mean_normalized <- GetAssayData(object = sensory_neurons_data, assay = "RNA", slot = "data")
+
+# Calculate mean expression per gene across all the selected cells
+gene_expression_means <- rowMeans(rna_mean_normalized)
+
+# Create data frame with gene names (rownames from the RNA assay) and corresponding average expression counts
+gene_names <- rownames(rna_mean_normalized)
+gene_expression_df <- data.frame(
+  gene_name = gene_names,
+  avg_counts = gene_expression_means
+)
+
+# Load gene annotation GTF file
+gene_annotation_gtf <- read.table("/Users/alaric/Desktop/Master_Thesis_Systems_Biology/Code/outputs/gene_annotation_gtf.txt", header = TRUE, sep = "\t")
+
+# Merge gene_expression_df with gene_annotation_gtf to map gene_id to each gene_name
+merged_data_frame <- merge(gene_expression_df, gene_annotation_gtf, by = "gene_name", all.x = TRUE)
+
+# Filter out rows where gene_id is NA
+genes_with_id <- na.omit(merged_data_frame)  # Removes rows with NA in any column
+
+# Filter and extract gene names without an ID before omitting NAs:
+genes_without_id <- merged_data_frame[is.na(merged_data_frame$gene_id), ]
+gene_names_without_id <- genes_without_id$gene_name
+
+# Continue with genes that have IDs for further analysis
+final_data_frame <- genes_with_id  # Contains only rows with a valid gene_id
+
+# Select only the columns you want to retain
+final_data_frame <- final_data_frame[, c("gene_id", "avg_counts")]
+
+# Output the final data frame with gene_id and avg_counts to a file
+write.table(final_data_frame, 
+            '/Users/alaric/Desktop/Master_Thesis_Systems_Biology/Code_local/outputs_local/Neurons/Counts_for_iMAT/ASJ_neurons_rna_mean_normalized.txt', 
+            sep = "\t", 
+            row.names = FALSE,  
+            col.names = TRUE,  
+            quote = FALSE)
+```
+

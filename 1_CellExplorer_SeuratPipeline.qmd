@@ -1,0 +1,484 @@
+---
+title: "Pre-processing"
+format: html
+---
+
+## Importing all required libraries
+```{r}
+library(tidyverse)
+library(Seurat)
+library(gprofiler2)
+library(stringr)
+library(patchwork)
+library(enrichplot)
+library(clusterProfiler)
+library(org.Ce.eg.db)
+```
+
+## Importing Data from NCBI 
+Run this chunk in the terminal
+```{bash}
+cd /media/cdn-bc/RAID/StudentProjects/Alaric/originals
+wget -O GSE126954_cell_annotation.csv https://ftp.ncbi.nlm.nih.gov/geo/series/GSE126nnn/GSE126954/suppl/GSE126954%5Fcell%5Fannotation%2Ecsv%2Egz
+wget -O GSE126954_gene_annotation.csv https://ftp.ncbi.nlm.nih.gov/geo/series/GSE126nnn/GSE126954/suppl/GSE126954%5Fgene%5Fannotation%2Ecsv%2Egz
+wget -O GSE126954_gene_by_cell_count_matrix.txt https://ftp.ncbi.nlm.nih.gov/geo/series/GSE126nnn/GSE126954/suppl/GSE126954%5Fgene%5Fby%5Fcell%5Fcount%5Fmatrix%2Etxt%2Egz
+```
+
+## Read Data
+```{r}
+GSE126954_cell_annotation <- read.csv("/media/cdn-bc/RAID/StudentProjects/Alaric/originals/GSE126954_cell_annotation.csv")
+GSE126954_gene_annotation <- read.csv("/media/cdn-bc/RAID/StudentProjects/Alaric/originals/GSE126954_gene_annotation.csv")
+GSE126954_gene_by_cell_count_matrix <- read.delim("/media/cdn-bc/RAID/StudentProjects/Alaric/originals/GSE126954_gene_by_cell_count_matrix.txt", sep = " ", header = F, skip = 2)
+```
+
+## Creating the Matrix, Cleaning and Saving
+```{r}
+# Rename columns in the gene-by-cell count matrix
+names(GSE126954_gene_by_cell_count_matrix) <- c("Genes", "Cells", "Counts")
+
+# Convert the long format matrix to a wide format matrix, setting genes as columns, cells as rows, and filling missing values with 0
+GSE126954_gene_matrix <- pivot_wider(GSE126954_gene_by_cell_count_matrix, names_from = Genes, values_from = Counts, id_cols = Cells, values_fill = 0)
+
+# Remove the first column
+GSE126954_gene_matrix <- select(GSE126954_gene_matrix, -1)
+
+# Convert the data frame to a matrix
+GSE126954_gene_matrix <- as.matrix(GSE126954_gene_matrix)
+
+# Set the row names of the matrix to cell names
+rownames(GSE126954_gene_matrix) <- GSE126954_cell_annotation[,1]
+
+# Map gene names to columns for gene identification
+# Create a mapping table with index and gene short names
+mapping_table <- data.frame(Index = 1:nrow(GSE126954_gene_annotation),
+                            GeneName = GSE126954_gene_annotation$gene_short_name,
+                            row.names = as.character(1:nrow(GSE126954_gene_annotation)))
+
+# Subset the mapping table to only include genes present in the matrix
+subset_mapping <- mapping_table[colnames(GSE126954_gene_matrix), ]
+
+# Update column names in the matrix with gene names from the mapping table
+colnames(GSE126954_gene_matrix) <- subset_mapping$GeneName
+
+# Transpose the matrix to align rows with samples and columns with genes, as required for Seurat analysis
+GSE126954_gene_matrix_final <- t(GSE126954_gene_matrix)
+
+# Save the processed matrix to a text file, preserving row and column names for future reference
+write.table(GSE126954_gene_matrix_final, file = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/GSE126954_gene_matrix_final.txt", sep = "\t", row.names = TRUE, col.names = NA)
+```
+
+## Creating the Seurat Oject and Saving into RDS format
+```{r}
+# Create a Seurat object using the transposed gene matrix, setting parameters for the project, minimum cell and feature counts
+packer_Seurat <- CreateSeuratObject(counts = GSE126954_gene_matrix_final, project = "SeuratProject", min.cells = 3, min.features = 200)
+
+# Set the row names of the cell annotation data to the cell IDs for merging
+GSE126954_cell_annotation <- GSE126954_cell_annotation %>%
+    column_to_rownames("X")
+
+# Merge cell annotation data with the Seurat object's metadata
+packer_Seurat@meta.data <- cbind(packer_Seurat@meta.data, GSE126954_cell_annotation[colnames(packer_Seurat),])
+
+# Save the Seurat object to an RDS file for efficient storage and future retrieval
+saveRDS(packer_Seurat, file = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/RDS_files/packer_Seurat.rds")
+```
+
+## QC and selecting cells for further analysis
+```{r}
+# Identifying mitochondrial genes and calculating their expression percentage in each cell
+# Quality control, high mitochondrial gene expression can indicate cell stress or death
+mt.genes <- c("nduo-1", "nduo-2", "nduo-3", "nduo-4", "nduo-5", "nduo-6", "ctc-1", "ctc-2", "ctc-3", "ndfl-4", "atp-6", "ctb-1") # names of mitochondrial genes
+packer_Seurat[["percent.mt"]] <- PercentageFeatureSet(packer_Seurat, features = mt.genes)
+
+# Visualisation of key quality control metrics using violin plots
+# 'nFeature_RNA' shows the number of genes detected, 'nCount_RNA' represents total gene counts, and 'percent.mt' indicates mitochondrial gene expression percentage
+
+# Extract the data
+data <- FetchData(
+  packer_Seurat,
+  vars = c("nFeature_RNA", "nCount_RNA", "percent.mt")
+)
+
+# Melt the data to long format for faceting
+data_long <- data %>%
+  rownames_to_column("cell") %>%
+  pivot_longer(
+    cols = -cell,
+    names_to = "metric",
+    values_to = "value"
+  )
+
+# Colors for each metric
+colors <- c("nFeature_RNA" = "blue", "nCount_RNA" = "red", "percent.mt" = "green")
+
+# Function to generate a violin plot for a given metric
+generate_violin_plot <- function(data, metric_name) {
+  ggplot(data_long %>% filter(metric == metric_name), aes(x = metric, y = value, fill = metric)) +
+    geom_violin() +
+    geom_point(position = position_jitter(width = 0.1), alpha = 0.1, size = 1) +
+    theme_minimal() +
+    theme(axis.text.x = element_blank(),
+          axis.ticks.x = element_blank(),
+          plot.title = element_text(size = 14, face = "bold"),
+          axis.title = element_text(size = 12)) +
+    labs(title = metric_name, y = "Value", x = "") +
+    scale_fill_manual(values = colors[metric_name]) +
+    guides(fill = FALSE)
+}
+
+# Generate plots for each metric
+plot_nFeature_RNA <- generate_violin_plot(data, "nFeature_RNA")
+plot_nCount_RNA <- generate_violin_plot(data, "nCount_RNA")
+plot_percent_mt <- generate_violin_plot(data, "percent.mt")
+
+# Arrange the plots side by side using patchwork
+combined_plot <- plot_nFeature_RNA | plot_nCount_RNA | plot_percent_mt
+
+# Save the plot 
+ggsave(filename = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures/violin_plot_quality_control_metrics.png", plot = combined_plot, width = 10, height = 6)
+
+# Calculate the cumulative distributions
+features_to_plot <- c("nFeature_RNA", "nCount_RNA", "percent.mt")
+plot_list <- list()
+
+for(feature in features_to_plot) {
+  # Extract the data for the feature
+  data <- FetchData(packer_Seurat, vars = feature)
+  
+  # Calculate the cumulative distribution
+  data <- data %>%
+    arrange(!!sym(feature)) %>%
+    mutate(rank = row_number(),
+           percentile = rank / n() * 100,
+           cumulative_count = cumsum(!!sym(feature))) %>%
+    select(rank, percentile, !!sym(feature))
+  
+  # Create the plot
+  p <- ggplot(data, aes(x = !!sym(feature), y = percentile)) +
+    geom_line() +
+    labs(title = paste("Cumulative Distribution of", feature),
+         x = "Counts",
+         y = "Percentile") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  plot_list[[feature]] <- p
+}
+
+# Save each plot separately
+output_directory <- "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures"
+for(i in seq_along(plot_list)) {
+  feature_name <- features_to_plot[i]
+  filename <- sprintf("%s/cumulative_distribution_%s.png", output_directory, feature_name)
+  ggsave(filename, plot = plot_list[[i]], width = 10, height = 6)
+}
+
+# Visualizing the relationship between different QC metrics before filtering
+# Scatter plots help in assessing the correlation between our metrics
+plot1 <- FeatureScatter(packer_Seurat, feature1 = "nCount_RNA", feature2 = "percent.mt") +
+  theme_minimal() +
+  ggtitle("Total Counts vs. Mitochondrial Percentage")
+
+plot2 <- FeatureScatter(packer_Seurat, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") +
+  theme_minimal() +
+  ggtitle("Total Counts vs. Number of Features")
+
+plot1 + plot2
+
+combined_before_filtering <- plot1 + plot2
+
+ggsave(filename = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures/combined_qc_metrics_before_filtering.png", plot = combined_before_filtering, width = 12, height = 6)
+
+# Filtering cells based on quality control metrics
+# Remove cells with fewer than 200 detected genes, more than 4200 genes, or those with more than 10% mitochondrial gene counts
+# This step removes low-quality cells for the analysis
+packer_Seurat_filtered <- subset(packer_Seurat, subset = nFeature_RNA >= 200 & nFeature_RNA <= 4200 & percent.mt <= 10)
+
+# Visualizing the relationship between QC metrics after filtering
+# Evaluates the effect of filtering on data quality 
+plot1 <- FeatureScatter(packer_Seurat_filtered, feature1 = "nCount_RNA", feature2 = "percent.mt") +
+  theme_minimal() +
+  ggtitle("Filtered: Total Counts vs. Mitochondrial Percentage")
+
+plot2 <- FeatureScatter(packer_Seurat_filtered, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") +
+  theme_minimal() +
+  ggtitle("Filtered: Total Counts vs. Number of Features")
+
+plot1 + plot2
+
+combined_after_filtering <- plot1 + plot2
+
+ggsave(filename = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures/combined_qc_metrics_after_filtering.png", plot = combined_after_filtering, width = 12, height = 6)
+```
+
+## Normalising the data
+```{r}
+# Applying global-scaling normalization to the filtered Seurat object
+# The "LogNormalize" method is used for normalization. This method normalizes each cell's gene expression levels by the total expression in that cell, scales this by a factor of 10,000 (to bring the values to a more manageable range), and then applies a natural logarithm transformation. Such normalization mitigates the impact of differences in sequencing depth across cells and makes the expression data comparable across the dataset.
+packer_Seurat_filtered <- NormalizeData(packer_Seurat_filtered, normalization.method = "LogNormalize", scale.factor = 10000)
+```
+
+## Identification of highly variable features (feature selection)
+```{r}
+# Identifying a subset of features with high cell-to-cell variation.
+# This step highlights genes that are highly or lowly expressed across cells, useful for capturing biological variability.
+# 'vst' method is used for feature selection, and the top 2000 features are identified.
+packer_Seurat_filtered <- FindVariableFeatures(packer_Seurat_filtered, selection.method = "vst", nfeatures = 2000)
+
+# Retrieve the top 10 most highly variable genes from the dataset
+top10 <- head(VariableFeatures(packer_Seurat_filtered), 10)
+
+# Plot the variable features using a scatter plot and label the top 10 most variable genes
+plot_variable_features <- VariableFeaturePlot(packer_Seurat_filtered) +
+  theme_minimal() +
+  ggtitle("Variable Features with Top 10 Labeled")
+
+# Add labels for the top 10 most variable genes
+plot_with_labels <- LabelPoints(plot = plot_variable_features, points = top10, repel = TRUE)
+
+# Save the plot
+ggsave(filename = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures/variable_features_with_top_10_labeled.png", plot = plot_with_labels, width = 10, height = 6)
+
+# Getting the symbols of the top 2000 variable genes
+variable_genes_symbols <- VariableFeatures(packer_Seurat_filtered)
+
+# Mapping gene symbols to Entrez IDs
+# Note: Some symbols might not map due to discrepancies or absences in the database
+gene_list_mapped <- bitr(variable_genes_symbols, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Ce.eg.db) # 7.3% of input gene IDs are fail to map
+
+# Check for unmapped genes which can be important 
+unmapped_genes <- setdiff(variable_genes_symbols, gene_list_mapped$SYMBOL)
+
+# Prepare the vector of Entrez IDs for enrichment analysis
+gene_vector <- gene_list_mapped$ENTREZID
+
+# Perform GO enrichment analysis using Biological Process ontology
+ego <- enrichGO(gene         = gene_vector,
+                OrgDb        = org.Ce.eg.db,
+                keyType      = "ENTREZID",
+                ont          = "BP",
+                pAdjustMethod = "BH",
+                qvalueCutoff  = 0.05,
+                readable      = TRUE)
+
+# Dot plot of the GO enrichment analysis
+GO_dotplot <- dotplot(ego, showCategory=20) +
+  ggtitle("GO Biological Process Enrichment Analysis") +
+  theme(
+    axis.text.y = element_text(size = rel(0.75)), # Increase the size of the text to make more space
+    plot.margin = margin(1, 1, 1, 8, "lines") # Adjust the margins to make more space for text
+  ) +
+  scale_size(range = c(2, 5))
+ggsave(filename = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures/GO_dotplot.png", plot = GO_dotplot, width = 12, height = 6)
+```
+
+## Scaling the data in the Seurat object.
+```{r}
+# This process involves a linear transformation of the gene expression data, where:
+# 1. The expression of each gene is centered to have a mean of 0 across all cells. This mean-centering step shifts the gene expression distribution so that each gene has a mean expression value of zero.
+# 2. The expression of each gene is scaled to have a variance (and therefore standard deviation) of 1. This variance-scaling step ensures that all genes have the same level of variance across cells.
+# By doing this, the procedure gives equal weight to all genes in downstream analyses, such as dimensionality reduction and clustering, and prevents genes with higher expression levels from dominating these analyses.
+# 'all.genes' contains the names of all genes in the filtered dataset, indicating that the scaling should be applied to all genes.
+all.genes <- row.names(packer_Seurat_filtered)
+packer_Seurat_filtered <- ScaleData(packer_Seurat_filtered, features = all.genes)
+```
+
+## Cell Cycle Scoring
+```{r}
+# Identifying cell cycle genes for human and converting them to C. elegans orthologs
+s.genes <- cc.genes.updated.2019$s.genes
+g2m.genes <- cc.genes.updated.2019$g2m.genes
+
+# Converting human cell cycle genes to C. elegans orthologs using gorth function
+s.genes.worm <- gorth(s.genes, source_organism = "hsapiens", target_organism = "celegans")$ortholog_name
+g2m.genes.worm <- gorth(g2m.genes, source_organism = "hsapiens", target_organism = "celegans")
+
+# Scoring cells based on S and G2/M phase markers
+packer_Seurat_filtered <- CellCycleScoring(packer_Seurat_filtered, s.features = s.genes.worm, g2m.features = g2m.genes.worm, set.ident = TRUE)
+
+# Save updated Seurat object after cell cycle scoring
+saveRDS(packer_Seurat_filtered, file = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/RDS_files/packer_Seurat_filtered.rds")
+```
+
+## Visualisation of clustering based on cell cycle
+```{r}
+# Visualizing cell cycle phase markers using RidgePlot
+# This plot displays the distribution of 'S.Score' and 'G2M.Score' across cells
+features_to_plot <- c("S.Score", "G2M.Score")
+ridge_plot <- RidgePlot(packer_Seurat_filtered, features = features_to_plot, ncol = 2) +
+  xlim(c(-0.5, 0.2))
+ggsave(filename = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures/ridge_plot_cell_cycle_scores.png", plot = ridge_plot, width = 10, height = 6)
+
+# Barplot to show the distribution of cells across different cell cycle phases
+bar_plot <- ggplot(packer_Seurat_filtered@meta.data, aes(x = Phase, fill = Phase)) +
+  geom_bar() +
+  scale_fill_brewer(palette = "Set1") + 
+  labs(title = "Distribution of Cell Cycle Phases",
+       x = "Cell Cycle Phase", y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")
+ggsave(filename = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures/distribution_cell_cycle_phases.png", plot = bar_plot, width = 8, height = 6)
+
+# Runs Principal Component Analysis (PCA) for dimensionality reduction
+packer_Seurat_filtered <- RunPCA(packer_Seurat_filtered)
+
+# DimPlot to show cells in PCA space, split by cell cycle phase
+# This visualization helps to observe how cells from different cycle phases distribute in PCA-reduced space
+pca_dim_plot <- DimPlot(packer_Seurat_filtered, reduction = "pca", split.by = "Phase", label = FALSE) +
+  theme_minimal() +
+  ggtitle("PCA DimPlot Split by Cell Cycle Phase")
+ggsave(filename = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures/pca_dimplot_by_cell_cycle_phase.png", plot = pca_dim_plot, width = 10, height = 6)
+```
+
+## SCTransform
+```{r}
+# Applies SCTransform to the Seurat object
+packer_Seurat_filtered <- SCTransform(packer_Seurat_filtered, verbose = FALSE)
+
+# Overwrite the Seurat Object into a RDS file in the outputs
+saveRDS(packer_Seurat_filtered, file = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/RDS_files/packer_Seurat_filtered.rds")
+```
+
+# Visualisation of the SCTransformed data
+```{r}
+# Cell Cycle Gene Visualization
+# Creats violin plots for cell cycle genes
+cell_cycle_violin_plot <- VlnPlot(packer_Seurat_filtered, features = features_to_plot, ncol = 2, pt.size = 0)
+ggsave(filename = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures/cell_cycle_violin_plot.png", plot = cell_cycle_violin_plot, width = 10, height = 6)
+
+# Insulin Peptide Family Gene Visualization
+genes_of_interest <- c("daf-28", "daf-7", "ins-6", "ins-2")
+
+# Creats violin plots for these specific genes
+insulin_family_violin_plot <- VlnPlot(packer_Seurat_filtered, features = genes_of_interest, ncol = 2, pt.size = 0)
+ggsave(filename = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures/insulin_family_violin_plot.png", plot = insulin_family_violin_plot, width = 10, height = 6)
+
+# Groups Violin Plot for Cell Type
+# Creating a violin plot for the first gene in 'genes_of_interest', grouped by 'cell.type'
+grouped_violin_plot <- VlnPlot(packer_Seurat_filtered, features = genes_of_interest[1], pt.size = 0, group.by = "cell.type") +
+  theme_minimal() +
+  ggtitle("Gene Expression by Cell Type") +
+  NoLegend()
+ggsave(filename = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures/grouped_violin_plot_cell_type.png", plot = grouped_violin_plot, width = 8, height = 6)
+
+# Dimensionality Reduction Techniques
+# Runs PCA on the filtered Seurat object
+packer_Seurat_filtered <- RunPCA(packer_Seurat_filtered, features = VariableFeatures(object = packer_Seurat_filtered))
+
+# Runs tSNE using the first two principal components
+packer_Seurat_filtered <- RunTSNE(packer_Seurat_filtered, dims = 1:2)
+
+# Runs UMAP using all 50 principal components
+packer_Seurat_filtered <- RunUMAP(packer_Seurat_filtered, dims = 1:50)
+
+# Dimensionality Reduction Visualizations
+# PCA Plot
+pca_plot <- DimPlot(packer_Seurat_filtered, reduction = "pca") +
+  theme_minimal() +
+  ggtitle("PCA Plot")
+ggsave(filename = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures/pca_plot.png", plot = pca_plot, width = 8, height = 6)
+
+# UMAP Plot
+umap_plot <- DimPlot(packer_Seurat_filtered, reduction = "umap") +
+  theme_minimal() +
+  ggtitle("UMAP Plot")
+ggsave(filename = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures/umap_plot.png", plot = umap_plot, width = 8, height = 6)
+
+# tSNE Plot by Cell Type
+tsne_cell_type_plot <- DimPlot(packer_Seurat_filtered, reduction = "tsne", group.by = "cell.type", label = TRUE) +
+  theme_minimal() + NoLegend() +
+  ggtitle("tSNE Plot by Cell Type")
+ggsave(filename = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures/tsne_plot_by_cell_type.png", plot = tsne_cell_type_plot, width = 8, height = 6)
+
+# tSNE Plot by Lineage
+tsne_lineage_plot <- DimPlot(packer_Seurat_filtered, reduction = "tsne", group.by = "lineage") +
+  theme_minimal() +
+    theme(legend.position = "none") +
+  ggtitle("tSNE Plot by Lineage")
+ggsave(filename = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures/tsne_plot_by_lineage.png", plot = tsne_lineage_plot, width = 8, height = 6)
+
+# UMAP Plot by Cell Type with a Side Legend
+umap_cell_type_label_plot <- DimPlot(packer_Seurat_filtered, reduction = "umap", group.by = "cell.type", label = FALSE) +
+  theme_minimal() +
+  theme(legend.position = "right") + 
+    theme(legend.position = "right",
+        legend.key.size = unit(0.4, "cm"), 
+        legend.text = element_text(size = 4), 
+        legend.spacing.x = unit(0.15, "cm"), 
+        legend.spacing.y = unit(0.15, "cm")) + 
+  ggtitle("UMAP Plot by Cell Type")
+  ggtitle("UMAP Plot by Cell Type")
+ggsave(filename = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures/umap_plot_by_cell_type_with_labels.png", plot = umap_cell_type_label_plot, width = 8, height = 6)
+
+# UMAP Plot by Lineage
+umap_lineage_plot <- DimPlot(packer_Seurat_filtered, reduction = "umap", group.by = "lineage") +
+  theme_minimal() +
+    theme(legend.position = "none")+
+    ggtitle("UMAP Plot by Lineage")
+ggsave(filename = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures/umap_plot_by_lineage.png", plot = umap_lineage_plot, width = 8, height = 6)
+```
+
+## Selecting Neurons for Analysis (in the cell type)
+```{r}
+# Filter out only neuron cells from the Seurat object cell type
+neuron_cells <- grep("neuron", packer_Seurat_filtered@meta.data$cell.type, value = FALSE)
+
+# Print the total number of neuron cells identified
+print(paste("Number of neurons identified:", length(neuron_cells)))
+
+# Create a new Seurat object with only neuron cells
+packer_Seurat_neurons <- subset(packer_Seurat_filtered, cells = neuron_cells)
+
+# Save neuron-specific Seurat object
+saveRDS(packer_Seurat_neurons, file = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/RDS_files/packer_Seurat_neurons.rds")
+
+# Scale data in the neuron Seurat object
+packer_Seurat_neurons <- ScaleData(packer_Seurat_neurons)
+
+# Run PCA on neuron data
+packer_Seurat_neurons <- RunPCA(packer_Seurat_neurons)
+
+# PCA Plot
+pca_plot_neurons <- DimPlot(packer_Seurat_neurons, reduction = "pca", group.by = "cell.type") +
+  theme_minimal() +
+  ggtitle("PCA Plot of Neuron Clusters")
+
+# Save the PCA plot to a file
+ggsave(filename = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures/pca_plot_neurons_clusters.png", plot = pca_plot_neurons, width = 10, height = 6)
+
+# Execute UMAP for dimensionality reduction
+packer_Seurat_neurons <- RunUMAP(packer_Seurat_neurons, dims = 1:50)
+
+# Perform neighborhood search for clustering
+packer_Seurat_neurons <- FindNeighbors(packer_Seurat_neurons, dims = 1:50)
+
+# Cluster neurons based on their features
+packer_Seurat_neurons <- FindClusters(packer_Seurat_neurons, resolution = 0.5) 
+
+# Plot UMAP visualization of neuron clusters
+umap_plot_neurons <- DimPlot(packer_Seurat_neurons, reduction = "umap", label = TRUE) +
+    theme_minimal() +
+    theme(legend.position = "none") +
+    ggtitle("UMAP Plot of Neuron Clusters")
+
+# Save the UMAP plot to a file
+ggsave(filename = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures/umap_plot_neurons_clusters.png", plot = umap_plot_neurons, width = 10, height = 6)
+
+# UMAP Plot by Cell (Sub)Type with a Side Legend
+umap_neurons_cell_type_label_plot <- DimPlot(packer_Seurat_neurons, reduction = "umap", group.by = "cell.type", label = FALSE) +
+  theme_minimal() +
+  theme(legend.position = "right") + 
+    theme(legend.position = "right",
+        legend.key.size = unit(0.4, "cm"), 
+        legend.text = element_text(size = 4), 
+        legend.spacing.x = unit(0.15, "cm"), 
+        legend.spacing.y = unit(0.15, "cm")) + 
+  ggtitle("UMAP Plot Neurons by Cell Subtype")
+ggsave(filename = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures/umap_plot_neurons_by_cell_type_with_labels.png", plot = umap_neurons_cell_type_label_plot, width = 8, height = 6)
+```
+
+
+
+
+

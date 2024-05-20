@@ -1,0 +1,118 @@
+---
+title: "Exploratory"
+output: html_document
+date: "2024-01-23"
+---
+## Importing all required libraries
+```{r}
+library(Seurat)
+library(ggplot2)
+library(ggrepel)
+library(EnhancedVolcano)
+library(tidyverse)
+```
+
+## Load the neuron-specific Seurat 
+```{r}
+packer_Seurat_neurons <- readRDS(file = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/RDS_files/packer_Seurat_neurons.rds")
+```
+
+## Differential Gene Expression Analysis on entire list of neurons
+```{r}
+# List of sensory neurons
+sensory_neurons <- c('ADA', 'ADE', 'ADF', 'ADL', 'AFD', 'AIA', 'AIB', 'AIM', 'AIN', 'AIY', 'AIZ', 'ALA', 'ALM', 'ALN', 'AQR', 'AS', 'ASEL', 'ASER', 'ASG', 'ASH', 'ASI', 'ASJ', 'ASK', 'AUA', 'AVA', 'AVB', 'AVD', 'AVE', 'AVF', 'AVG', 'AVH', 'AVJ', 'AVK', 'AVL', 'AVM', 'AWA', 'AWB', 'AWC_OFF', 'AWC_ON', 'BAG', 'BDU', 'CAN', 'CEP', 'DA', 'DA9', 'DB', 'DB01', 'DVA', 'DVB', 'DVC', 'FLP', 'HSN', 'I1', 'I2', 'I3', 'I4', 'I5', 'I6', 'IL1', 'IL2_DV', 'IL2_LR', 'LUA', 'M1', 'M2', 'M3', 'M4', 'M5', 'MC', 'MI', 'NSM', 'OLL', 'OLQ', 'PDA', 'PDB', 'PDE', 'PHA', 'PHB', 'PHC', 'PLM', 'PLN', 'PQR', 'PVC', 'PVD', 'PVM', 'PVN', 'PVP', 'PVQ', 'PVR', 'PVT', 'PVW', 'RIA', 'RIB', 'RIC', 'RID', 'RIF', 'RIG', 'RIH', 'RIM', 'RIP', 'RIR', 'RIS', 'RIV', 'RMD_DV', 'RMD_LR', 'RME_DV', 'RME_LR', 'RMF', 'RMG', 'RMH', 'SAA', 'SAB', 'SDQ', 'SIA', 'SIB', 'SMB', 'SMD', 'URA', 'URB', 'URX', 'URY', 'VA', 'VA12', 'VB', 'VB01', 'VB02', 'VC', 'VC_4_5', 'VD_DD')
+
+# Subset the packerSeurat_neurons based on these sensory neurons
+packer_Seurat_neurons_subset <- subset(packer_Seurat_neurons, subset = `cell.subtype` %in% sensory_neurons)
+
+# Set the identity class in the Seurat object using the 'cell.(sub)type' column from metadata
+packer_Seurat_neurons <- SetIdent(packer_Seurat_neurons_subset, value = "cell.subtype")
+
+# Find all markers across all cells
+all_markers <- FindAllMarkers(packer_Seurat_neurons, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+
+# Filter top 10 markers by cluster. Ensure you're using avg_log2FC for sorting
+top_markers_per_cluster <- all_markers %>%
+  group_by(cluster) %>%
+  top_n(n = 5, wt = avg_log2FC)
+
+# Create a list of unique genes from the top markers
+unique_genes <- unique(top_markers_per_cluster$gene)
+
+# Create the dot plot for the selected markers
+dotplot <- DotPlot(packer_Seurat_neurons, features = unique_genes) + 
+  RotatedAxis() +
+  theme(legend.position = "right", 
+        axis.text.x = element_text(size = 8), 
+        axis.title = element_text(size = 8)) + 
+  ggtitle("Top 5 Neuron Markers Dot Plot") 
+
+# Save the plot with the new adjustments
+ggsave("/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures/neuron_subtype_markers_dotplot.png", plot = dotplot, width = 10, height = 6)
+```
+
+
+## Differential Gene Expression Analysis on ASI and ASJ which are neurons that regulate dauer formation and recovery
+```{r}
+# Set the identity class to cell subtype
+packer_Seurat_neurons <- SetIdent(packer_Seurat_neurons, value = packer_Seurat_neurons@meta.data$cell.subtype)
+
+# Find differentially expressed genes for ASI subtype
+de_genes_ASI <- FindMarkers(packer_Seurat_neurons, ident.1 = "ASI", min.pct = 0.25)
+
+# Calculate -log10 p-value and add it as a new column
+de_genes_ASI$neg_log10P <- -log10(de_genes_ASI$p_val)
+
+# View the top differentially expressed genes for ASI
+head(de_genes_ASI)
+
+# Define thresholds for significance
+threshold_pvalue <- 0.05
+threshold_log2FC <- log2(1.5) 
+
+# Volcano plot for ASI subtype with threshold annotations
+volcano_plot_ASI <- ggplot(de_genes_ASI, aes(x = avg_log2FC, y = neg_log10P)) +
+  geom_point(aes(color = p_val < threshold_pvalue & abs(avg_log2FC) > threshold_log2FC), alpha = 0.8) +
+  scale_color_manual(values = c("grey", "red")) +
+  geom_vline(xintercept = c(-threshold_log2FC, threshold_log2FC), linetype = "dashed", color = "blue") +
+  geom_hline(yintercept = -log10(threshold_pvalue), linetype = "dashed", color = "blue") +
+  annotate("text", x = c(-threshold_log2FC, threshold_log2FC), y = c(1, 1), label = c("-1.5 fold", "1.5 fold"), color = "blue", vjust = -0.5, size = 4) +
+  annotate("text", x = 1, y = -log10(threshold_pvalue), label = "p = 0.05", color = "blue", hjust = -0.5, size = 4) +
+  theme_minimal() +
+  labs(title = "Volcano Plot for ASI Neuron Subtype",
+       x = "Log2 Fold Change",
+       y = "-Log10 P-Value") +
+  theme(legend.position = "none") +
+  # Adjusting the scale:
+  coord_cartesian(xlim = c(-6, 6), ylim = c(0, 300)) 
+ggsave(filename = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures/volcano_plot_ASI.png", plot = volcano_plot_ASI, width = 10, height = 8)
+
+## Find differentially expressed genes for ASJ subtype
+de_genes_ASJ <- FindMarkers(packer_Seurat_neurons, ident.1 = "ASJ", min.pct = 0.25)
+
+# Calculate -log10 p-value and add it as a new column
+de_genes_ASJ$neg_log10P <- -log10(de_genes_ASJ$p_val)
+
+# View the top differentially expressed genes for ASJ
+head(de_genes_ASJ)
+
+# Volcano plot for ASJ subtype with threshold annotations
+volcano_plot_ASJ <- ggplot(de_genes_ASJ, aes(x = avg_log2FC, y = neg_log10P)) +
+  geom_point(aes(color = p_val < threshold_pvalue & abs(avg_log2FC) > threshold_log2FC), alpha = 0.8) +
+  scale_color_manual(values = c("grey", "red")) +  # Non-significant in grey, significant in red
+  geom_vline(xintercept = c(-threshold_log2FC, threshold_log2FC), linetype = "dashed", color = "blue") +
+  geom_hline(yintercept = -log10(threshold_pvalue), linetype = "dashed", color = "blue") +
+  annotate("text", x = c(-threshold_log2FC, threshold_log2FC), y = c(1, 1), label = c("-1.5 fold", "1.5 fold"), color = "blue", vjust = -0.5, size = 4) +
+  annotate("text", x = 1, y = -log10(threshold_pvalue), label = "p = 0.05", color = "blue", hjust = -0.5, size = 4) +
+  theme_minimal() +
+  labs(title = "Volcano Plot for AJI Neuron Subtype",
+       x = "Log2 Fold Change",
+       y = "-Log10 P-Value") +
+  theme(legend.position = "none")
+ggsave(filename = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures/volcano_plot_ASJ.png", plot = volcano_plot_ASJ, width = 10, height = 8)
+
+# Saving the data frames to text files
+write.table(de_genes_ASI, file = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/de_genes_ASI.txt", quote = FALSE, sep = "\t", row.names = TRUE)
+write.table(de_genes_ASJ, file = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/de_genes_ASJ.txt", quote = FALSE, sep = "\t", row.names = TRUE)
+```
+

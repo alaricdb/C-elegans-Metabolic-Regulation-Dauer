@@ -1,0 +1,319 @@
+---
+title: "Gene to Reactions"
+output: html_document
+date: "2024-01-29"
+---
+
+## Importing all required libraries
+```{r}
+library(readr)
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(ggplot2)
+library(tidyr)
+library(RColorBrewer)
+```
+
+## Importing all reactions with their associated genes 
+```{r}
+# Function to read first two columns and add reaction name and subdirectory information as separate columns
+read_first_two <- function(file_path, subdirs) {
+  df <- read_tsv(file_path, 
+                 col_types = cols(
+                   `Gene ID` = col_character(),
+                   `Gene Name` = col_character(),
+                   .default = col_skip()
+                 ),
+                 skip = 4)
+
+  # Extract the file name without the '.tsv' extension and assign it to the 'Reaction' column
+  df$Reaction <- gsub("\\.tsv$", "", basename(file_path))
+
+  # For each level of subdirectory, add a new column
+  for (i in 1:length(subdirs)) {
+    col_name <- paste0("Subdir", i)
+    df[[col_name]] <- subdirs[i]
+  }
+  
+  return(df)
+}
+
+# Function to process files in a directory and its subdirectories
+process_directory <- function(dir_path, base_path, subdirs = c()) {
+  
+  files <- list.files(path = dir_path, pattern = "*.tsv", full.names = TRUE, recursive = FALSE)
+  dirs <- list.dirs(path = dir_path, full.names = TRUE, recursive = FALSE)  
+
+  # Process files
+  data_list <- lapply(files, function(file) {
+    read_first_two(file, subdirs)
+  })
+
+  # Process subdirectories
+  for (subdir in dirs) {
+    subdir_name <- basename(subdir)
+    new_subdirs <- c(subdirs, subdir_name)
+    data_list <- c(data_list, process_directory(subdir, base_path, new_subdirs))
+  }
+
+  return(data_list)
+}
+
+# Base path for the root directory
+base_path <- "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/Metabolism/"
+
+# Process all directories and files starting from the base path
+reactions_genes_data <- bind_rows(process_directory(base_path, base_path))
+
+# Write the data to a text file
+write.table(reactions_genes_data, file = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/reactions_genes_data.txt", sep = "\t", row.names = FALSE, col.names = TRUE)
+```
+
+## Load the Seurat Object
+```{r}
+packer_Seurat_filtered <- readRDS(file = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/RDS_files/packer_Seurat_filtered.rds")
+```
+
+## Analysing Expression of Cell Types in Different Reactions
+```{r}
+# Select the top 10 reactions based on frequency
+top_reactions <- reactions_genes_data %>%
+  count(Reaction) %>%         
+  arrange(desc(n)) %>%         
+  top_n(10, n)                 # Select the top 10 reactions
+
+# Extract the list of reactions from top_reactions
+top_reactions_list <- top_reactions$Reaction
+
+# Create a custom color palette, one color per module score
+reaction_colors <- rainbow(length(module_score_names))
+names(reaction_colors) <- module_score_names
+
+# Filter the original data to get genes associated with each top reaction
+top_reactions_genes <- reactions_genes_data %>%
+  filter(Reaction %in% top_reactions_list)
+
+# Create a list where each element is a vector of gene names for a reaction
+reactions_genes_list <- split(top_reactions_genes$Gene.Name, top_reactions_genes$Reaction)
+
+# Loop through each reaction and calculate module scores
+for (reaction in names(reactions_genes_list)) {
+  gene_set <- reactions_genes_list[[reaction]]
+  packer_Seurat_filtered <- AddModuleScore(
+    object = packer_Seurat_filtered,
+    features = list(gene_set),
+    name = paste0("MS_", reaction)
+  )
+}
+```
+
+## Analysing Expression of Cell Types in Different Reactions
+```{r}
+# Generate violin plots for each reaction in the top reactions list
+# Visualize module scores for each cell type using Violin Plots
+lapply(names(reactions_genes_list), function(reaction) {
+  feature_name <- paste0("MS_", reaction, "1")
+  plot <- VlnPlot(packer_Seurat_filtered, features = feature_name, group.by = "cell.type") + NoLegend()
+  ggsave(filename = paste0("/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures/violin_cell_type_", reaction, ".png"), plot = plot, width = 10, height = 6)
+})
+
+# Visualize module scores for each cell subtype using Violin Plots
+lapply(names(reactions_genes_list), function(reaction) {
+  feature_name <- paste0("MS_", reaction, "1")
+  plot <- VlnPlot(packer_Seurat_filtered, features = feature_name, group.by = "cell.subtype") + NoLegend()
+  ggsave(filename = paste0("/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures/violin_cell_subtype_", reaction, ".png"), plot = plot, width = 10, height = 6)
+})
+```
+
+## Dotplot for pathways MS across cell types
+```{r}
+# Get the list of module score names
+feature_score_names <- paste0("MS_", names(reactions_genes_list), "1")
+
+# Subset the Seurat object to exclude cells where cell.type is NA
+packer_Seurat_filtered_subset <- subset(x = packer_Seurat_filtered, subset = cell.type != "NA")
+
+# This will create a new metadata column in Seurat object that holds the reaction name based on the module score
+# List of module score names corresponding to each reaction
+module_score_names <- c(
+  "MS_Aflatoxin_activation_and_detoxification1",
+  "MS_Biosynthesis_of_specialized_proresolving_mediators_SPMs1",
+  "MS_Metabolism_of_polyamines1",
+  "MS_Phase_I_Functionalization_of_compounds1",
+  "MS_Phase_II_Conjugation_of_compounds1",
+  "MS_Pyruvate_metabolism_and_Citric_Acid_TCA_cycle1",
+  "MS_Respiratory_electron_transport_ATP_synthesis_by_chemiosmotic_coupling_and_heat_production_by_uncoupling_proteins1",
+  "MS_Sphingolipid_metabolism1",
+  "MS_Synthesis_of_16_20_hydroxyeicosatetraenoic_acids_HETE1",
+  "MS_Synthesis_of_epoxy_EET_and_dihydroxyeicosatrienoic_acids_DHET1"
+)
+
+# Assuming packer_Seurat_filtered_subset is your Seurat object and has an identity class 'cell.type'
+all_data <- FetchData(packer_Seurat_filtered_subset, vars = c("cell.type", module_score_names))
+
+# Pivot the data to a long format suitable for plotting
+long_data <- all_data %>%
+  pivot_longer(
+    cols = -cell.type,        # Exclude cell type from pivoting
+    names_to = "Reaction",     # Column to store the reaction names
+    values_to = "Module_Score" # Column to store the module scores
+  )
+
+# Create a ggplot2 dot plot
+dot_plot <- ggplot(long_data, aes(x = cell.type, y = Reaction, color = Reaction, size = Module_Score)) +
+  geom_point(alpha = 0.5) +  # Adjust alpha to make dots slightly transparent if needed
+  scale_color_manual(values = reaction_colors) +  # Use custom colors defined earlier
+  theme_minimal() +
+  labs(
+    title = "Module Scores across Cell Types and Reactions",
+    x = "Cell Type",
+    y = "Reaction",
+    color = "Reaction",
+    size = "Module Score"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),  # Rotate x labels for better visibility
+    legend.position = "right"  # Ensure the legend is on the right
+  ) +
+  guides(
+    size = guide_legend(override.aes = list(color = "black"))  # Make size legend dots black for visibility
+  )
+
+# Save the plot with ultra-wide and long dimensions
+ggsave(
+  filename = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures/DotPlot_MS_Cell_Types_Reactions.png",
+  plot = dot_plot,
+  width = 30,
+  height = 15,
+  dpi = 300,
+  device = 'png'
+)
+```
+
+## Dotplot for pathways MS across neurons in cell types
+```{r}
+# Add a column to identify neuron cells
+packer_Seurat_filtered_subset$contains_neuron <- grepl("neuron", packer_Seurat_filtered_subset@meta.data$cell.type, ignore.case = TRUE)
+
+# Filter for neuron cells only
+neuron_data <- subset(packer_Seurat_filtered_subset, subset = contains_neuron == TRUE)
+
+# Fetch the required data for neuron cells
+neuron_scores_data <- FetchData(neuron_data, vars = c("cell.type", module_score_names))
+
+# Pivot the data to a long format suitable for plotting
+neuron_long_data <- neuron_scores_data %>%
+  pivot_longer(
+    cols = -cell.type,        # Exclude cell type from pivoting
+    names_to = "Reaction",     # Column to store the reaction names
+    values_to = "Module_Score" # Column to store the module scores
+  )
+
+# Create a ggplot2 dot plot with adjusted size contrast
+neuron_dot_plot <- ggplot(neuron_long_data, aes(x = cell.type, y = Reaction, color = Reaction, size = Module_Score)) +
+  geom_point(alpha = 0.5) +  # Adjust alpha to make dots slightly transparent if needed
+  scale_color_manual(values = reaction_colors) +  # Use custom colors defined earlier
+  theme_minimal() +
+  labs(
+    title = "Module Scores across Neuron Types and Reactions",
+    x = "Neuron Type",
+    y = "Reaction",
+    color = "Reaction",
+    size = "Module Score"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),  # Rotate x labels for better visibility
+    legend.position = "right",  # Ensure the legend is on the right
+    axis.text.y = element_blank(),  # Remove y-axis text
+    axis.ticks.y = element_blank()  # Remove y-axis ticks
+  ) +
+  guides(
+    size = guide_legend(override.aes = list(color = "black"))  # Make size legend dots black for visibility
+  ) +
+  scale_size(range = c(1, 10))  # Adjust size range for greater contrast
+
+# Save the plot with dimensions adjusted for neuron data
+ggsave(
+  filename = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures/DotPlot_MS_Neuron_Types_Reactions.png",
+  plot = neuron_dot_plot,
+  width = 30,  # Adjusted width as there may be fewer neuron types
+  height = 15,
+  dpi = 300,
+  device = 'png'
+)
+```
+
+## Dotplot for pathways MS across sensory neurons in cell sub.types 
+```{r}
+# Define the list of sensory neurons
+sensory_neurons <- c('ADA', 'ADE', 'ADF', 'ADL', 'AFD', 'AIA', 'AIB', 'AIM', 'AIN', 'AIY', 'AIZ', 'ALA', 'ALM', 'ALN', 'AQR', 'AS', 'ASEL', 'ASER', 'ASG', 'ASH', 'ASI', 'ASJ', 'ASK', 'AUA', 'AVA', 'AVB', 'AVD', 'AVE', 'AVF', 'AVG', 'AVH', 'AVJ', 'AVK', 'AVL', 'AVM', 'AWA', 'AWB', 'AWC_OFF', 'AWC_ON', 'BAG', 'BDU', 'CAN', 'CEP', 'DA', 'DA9', 'DB', 'DB01', 'DVA', 'DVB', 'DVC', 'FLP', 'HSN', 'I1', 'I2', 'I3', 'I4', 'I5', 'I6', 'IL1', 'IL2_DV', 'IL2_LR', 'LUA', 'M1', 'M2', 'M3', 'M4', 'M5', 'MC', 'MI', 'NSM', 'OLL', 'OLQ', 'PDA', 'PDB', 'PDE', 'PHA', 'PHB', 'PHC', 'PLM', 'PLN', 'PQR', 'PVC', 'PVD', 'PVM', 'PVN', 'PVP', 'PVQ', 'PVR', 'PVT', 'PVW', 'RIA', 'RIB', 'RIC', 'RID', 'RIF', 'RIG', 'RIH', 'RIM', 'RIP', 'RIR', 'RIS', 'RIV', 'RMD_DV', 'RMD_LR', 'RME_DV', 'RME_LR', 'RMF', 'RMG', 'RMH', 'SAA', 'SAB', 'SDQ', 'SIA', 'SIB', 'SMB', 'SMD', 'URA', 'URB', 'URX', 'URY', 'VA', 'VA12', 'VB', 'VB01', 'VB02', 'VC', 'VC_4_5', 'VD_DD')
+
+# Add a column to identify sensory neuron cells
+packer_Seurat_filtered$sensory_neuron <- packer_Seurat_filtered@meta.data$cell.subtype %in% sensory_neurons
+
+# Filter for sensory neuron cells only
+sensory_neuron_data <- subset(packer_Seurat_filtered, subset = sensory_neuron == TRUE)
+
+# Fetch the required data for sensory neurons
+sensory_neuron_scores_data <- FetchData(sensory_neuron_data, vars = c("cell.subtype", module_score_names))
+
+# Pivot the sensory neuron data to a long format suitable for plotting
+sensory_neuron_long_data <- sensory_neuron_scores_data %>%
+  pivot_longer(
+    cols = -cell.subtype,         # Exclude cell type from pivoting
+    names_to = "Reaction",     # Column to store the reaction names
+    values_to = "Module_Score" # Column to store the module scores
+  )
+
+# Create a ggplot2 dot plot with adjusted size contrast for sensory neurons
+sensory_neuron_dot_plot <- ggplot(sensory_neuron_long_data, aes(x = cell.subtype, y = Reaction, color = Reaction, size = Module_Score)) +
+  geom_point(alpha = 0.5) +  # Adjust alpha to make dots slightly transparent if needed
+  scale_color_manual(values = reaction_colors) +  # Use custom colors defined earlier
+  theme_minimal() +
+  labs(
+    title = "Module Scores across Sensory Neuron Subtypes and Reactions",
+    x = "Sensory Neuron Subtype",
+    y = "Reaction",
+    color = "Reaction",
+    size = "Module Score"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),  # Rotate x labels for better visibility
+    legend.position = "right",  # Ensure the legend is on the right
+    axis.text.y = element_blank(),  # Remove y-axis text
+    axis.ticks.y = element_blank()  # Remove y-axis ticks
+  ) +
+  guides(
+    size = guide_legend(override.aes = list(color = "black"))  # Make size legend dots black for visibility
+  ) +
+  scale_size(range = c(1, 10))  # Adjust size range for greater contrast
+
+# Save the plot with dimensions adjusted for sensory neuron data
+ggsave(
+  filename = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures/DotPlot_MS_Sensory_Neuron_Subtypes_Reactions.png",
+  plot = sensory_neuron_dot_plot,
+  width = 30,  # Adjusted width as there may be fewer sensory neuron types
+  height = 15,
+  dpi = 300,
+  device = 'png'
+)
+```
+
+## Save the 2 dotplots together
+```{r}
+# Combine the plots
+combined_plot <- dot_plot / sensory_neuron_dot_plot
+
+# Save the combined plot to a file
+ggsave(
+  filename = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/figures/Combined_DotPlot_MS.png",
+  plot = combined_plot,
+  width = 30,   # Set the width as needed
+  height = 30,  # Adjust the height to accommodate both plots
+  dpi = 600,
+  device = 'png'
+)
+```
+
+

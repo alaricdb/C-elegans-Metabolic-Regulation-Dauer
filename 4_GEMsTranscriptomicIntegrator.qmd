@@ -1,0 +1,97 @@
+---
+title: "GEMs to Transcriptomics genes"
+output: html_document
+editor: source
+---
+## Importing all required libraries
+```{r}
+library(Seurat)
+library(rtracklayer)
+library(dplyr)
+library(stringr)
+```
+
+## Loading iCEL1314 GEMs Data from: https://wormflux.umassmed.edu/download.php
+Run this script in the terminal
+```{bash}
+cd /media/cdn-bc/RAID/StudentProjects/Alaric/originals
+wget -O iCEL1314.xml https://wormflux.umassmed.edu/Downloads/iCEL1314.xml
+```
+
+## Load gene name and annotations (WBGene) from: https://ftp.ensembl.org/pub/release-111/gtf/caenorhabditis_elegans/
+```{bash}
+cd /media/cdn-bc/RAID/StudentProjects/Alaric/originals
+wget -O GSE126954_gene_annotation.gtf.gz https://ftp.ensembl.org/pub/release-111/gtf/caenorhabditis_elegans/Caenorhabditis_elegans.WBcel235.111.gtf.gz
+```
+
+## Read the GTF file
+```{r}
+GSE126954_gene_annotation.gtf <- import("/media/cdn-bc/RAID/StudentProjects/Alaric/originals/GSE126954_gene_annotation.gtf.gz")
+```
+
+## Transform GTF file into a Dataframe 
+```{r}
+# Convert GTF data to dataframe format
+gene_annotation_gtf <- as.data.frame(GSE126954_gene_annotation.gtf)
+
+# Duplicate and select essential columns for primary annotation
+gene_annotation_gtf1 <- gene_annotation_gtf %>%
+  distinct(gene_id, .keep_all = TRUE) %>%  # Remove duplicate gene_ids
+  select(gene_id, gene_name)  # Focus on gene_id and gene_name
+
+# Process and extract modified transcript IDs, then remove duplicates
+gene_annotation_gtf2 <- gene_annotation_gtf %>%
+  mutate(
+    mod_tx_id = str_extract(transcript_id, "^[A-Za-z0-9]+\\.[0-9]{1,2}")  # Extract base ID and version
+  ) %>%
+  distinct(mod_tx_id, .keep_all = TRUE) %>%  # Remove duplicates based on modified transcript ID
+  select(gene_id, gene_name = mod_tx_id)  # Rename mod_tx_id to gene_name
+
+# Process the manually extracted novel ensemble annotations which are different from the pattern ^[A-Za-z0-9]+\\.[0-9]{1,2}
+# Load the CSV file where gene_name and gene_id are in the same column separated by ";"
+gene_annotation_gtf3 <- read.csv("/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/genes_ids_ensemble_missing.csv", header=FALSE, sep =";", stringsAsFactors=FALSE)
+
+# Assign column names
+colnames(gene_annotation_gtf3) <- c("gene_name", "gene_id")
+
+# Now remove all rows where gene_id is NA or missing
+gene_annotation_gtf3 <- na.omit(gene_annotation_gtf3[gene_annotation_gtf3$gene_id != "", ])
+
+# Combine the three dataframes for comprehensive annotation
+combined_gene_annotation <- rbind(gene_annotation_gtf1, gene_annotation_gtf2, gene_annotation_gtf3) %>%
+  # Remove duplicates based on gene_name, keeping the first occurrence of each gene_name
+  distinct(gene_name, .keep_all = TRUE)
+
+# Output the combined annotation table to a file
+write.table(combined_gene_annotation, 
+            file = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/gene_annotation_gtf.txt",
+            sep = "\t", 
+            row.names = FALSE, 
+            col.names = TRUE, 
+            quote = FALSE)
+```
+
+## Load the filtered Seurat object and look at the missing genes in the iCEL1314 GEM model
+```{r}
+# Load the filtered Seurat object
+packer_Seurat_filtered <- readRDS(file = "/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/RDS_files/packer_Seurat_filtered.rds")
+
+# Extract gene list from Seurat object
+seurat_genes <- rownames(packer_Seurat_filtered@assays$RNA@features)
+
+# Convert seurat_genes to a dataframe for merging
+seurat_genes_df <- data.frame(gene_name = seurat_genes)
+
+# Merge to find corresponding WBGene IDs
+merged_genes <- merge(seurat_genes_df, combined_gene_annotation, by = "gene_name", all.x = TRUE)
+
+# Load the list of genes from the iCEL1314 GEM model
+icel1314_genes <- read.csv("/media/cdn-bc/RAID/StudentProjects/Alaric/outputs/iCEL1314_genes.csv", stringsAsFactors = FALSE)
+model_genes <- icel1314_genes$ID
+
+# Check for missing genes in the iCEL1314 GEM model
+missing_genes <- setdiff(model_genes, merged_genes$gene_id)
+
+# Output the missing genes
+print(missing_genes)
+```
